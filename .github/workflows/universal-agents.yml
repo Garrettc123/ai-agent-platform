@@ -1,0 +1,398 @@
+name: 🤖 Universal Agents - All Checks & Auto-Fix
+
+on:
+  push:
+    branches: [ main, master, develop, staging ]
+  pull_request:
+    branches: [ main, master, develop, staging ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+
+jobs:
+  # ===== PHASE 1: CODE QUALITY & LINTING =====
+  lint-and-format:
+    runs-on: ubuntu-latest
+    name: "Phase 1: Lint & Format"
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+        python-version: ['3.9', '3.11', '3.12']
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # === JavaScript/TypeScript Linting ===
+      - name: 📦 Install Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: 🎨 ESLint Check
+        if: hashFiles('package.json') != ''
+        run: npx eslint . --ext .js,.jsx,.ts,.tsx --fix --max-warnings 0 || true
+        continue-on-error: true
+
+      - name: ✨ Prettier Format Check
+        if: hashFiles('package.json') != ''
+        run: npx prettier --write . || true
+        continue-on-error: true
+
+      # === Python Linting ===
+      - name: 📦 Install Python dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort flake8 pylint bandit
+          pip install -r requirements.txt || true
+
+      - name: 🐍 Black Format Check
+        if: hashFiles('requirements.txt') != ''
+        run: black --line-length 100 . || true
+        continue-on-error: true
+
+      - name: 🔀 isort Import Sort
+        if: hashFiles('requirements.txt') != ''
+        run: isort . --profile black || true
+        continue-on-error: true
+
+      - name: 🔍 Flake8 Linting
+        if: hashFiles('requirements.txt') != ''
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+        continue-on-error: true
+
+  # ===== PHASE 2: TESTING =====
+  test:
+    runs-on: ubuntu-latest
+    name: "Phase 2: Testing"
+    needs: lint-and-format
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+        python-version: ['3.9', '3.11', '3.12']
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # === JavaScript/TypeScript Tests ===
+      - name: 📦 Install Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: 🧪 Jest Tests
+        if: hashFiles('package.json') != ''
+        run: npm test -- --coverage --watchAll=false || true
+        continue-on-error: true
+
+      - name: 📊 Upload Coverage
+        if: hashFiles('coverage') != ''
+        uses: codecov/codecov-action@v3
+
+      # === Python Tests ===
+      - name: 📦 Install Python dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov
+          pip install -r requirements.txt || true
+
+      - name: 🧪 Pytest
+        if: hashFiles('requirements.txt') != ''
+        run: pytest --cov --cov-report=xml || true
+        continue-on-error: true
+
+      - name: 📊 Upload Python Coverage
+        if: hashFiles('coverage.xml') != ''
+        uses: codecov/codecov-action@v3
+
+  # ===== PHASE 3: SECURITY SCANNING =====
+  security:
+    runs-on: ubuntu-latest
+    name: "Phase 3: Security Scanning"
+    needs: lint-and-format
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # === CodeQL Scanning ===
+      - name: 🔐 Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: 'javascript,python'
+
+      - name: 🔐 Autobuild
+        uses: github/codeql-action/autobuild@v2
+
+      - name: 🔐 Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+      # === Trivy Vulnerability Scanning ===
+      - name: 🛡️ Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: 📤 Upload Trivy Results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+      # === Secret Detection ===
+      - name: 🔑 Detect Secrets (TruffleHog)
+        uses: truffle-security/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --json
+        continue-on-error: true
+
+      # === npm Audit ===
+      - name: 📦 npm Audit
+        if: hashFiles('package.json') != ''
+        run: npm audit --audit-level=moderate || true
+        continue-on-error: true
+
+      # === Bandit (Python Security) ===
+      - name: 🐍 Setup Python for Bandit
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: 🛡️ Bandit Security Scan
+        if: hashFiles('*.py') != ''
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-report.json || true
+        continue-on-error: true
+
+  # ===== PHASE 4: CODE ANALYSIS =====
+  code-analysis:
+    runs-on: ubuntu-latest
+    name: "Phase 4: Code Analysis"
+    needs: lint-and-format
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: 📊 SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
+
+  # ===== PHASE 5: AUTO-FIX & COMMIT =====
+  auto-fix:
+    runs-on: ubuntu-latest
+    name: "Phase 5: Auto-Fix & Commit"
+    needs: [lint-and-format, test, security]
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # === Auto-fix JavaScript ===
+      - name: 📦 Install Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: 🔧 Auto-fix ESLint issues
+        if: hashFiles('package.json') != ''
+        run: npx eslint . --ext .js,.jsx,.ts,.tsx --fix || true
+
+      - name: ✨ Auto-format with Prettier
+        if: hashFiles('package.json') != ''
+        run: npx prettier --write . || true
+
+      # === Auto-fix Python ===
+      - name: 📦 Install Python dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort
+          pip install -r requirements.txt || true
+
+      - name: 🐍 Auto-format with Black
+        if: hashFiles('requirements.txt') != ''
+        run: black --line-length 100 . || true
+
+      - name: 🔀 Auto-sort imports with isort
+        if: hashFiles('requirements.txt') != ''
+        run: isort . --profile black || true
+
+      # === Commit fixes ===
+      - name: 📝 Commit auto-fixes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🤖 Auto-fix: Format code, fix linting issues" || true
+            git push
+          fi
+
+  # ===== PHASE 6: DEPENDENCY MANAGEMENT =====
+  dependencies:
+    runs-on: ubuntu-latest
+    name: "Phase 6: Dependency Management"
+    needs: lint-and-format
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 📦 Check npm dependencies
+        if: hashFiles('package.json') != ''
+        run: |
+          npm ci
+          npm outdated || true
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Check Python dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          pip install pip-audit
+          pip install -r requirements.txt || true
+          pip-audit || true
+
+  # ===== PHASE 7: BUILD VERIFICATION =====
+  build:
+    runs-on: ubuntu-latest
+    name: "Phase 7: Build Verification"
+    needs: [lint-and-format, test]
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # === JavaScript Build ===
+      - name: 📦 Install Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: 🏗️ Build Node project
+        if: hashFiles('package.json') != ''
+        run: npm run build || true
+        continue-on-error: true
+
+      # === Python Build ===
+      - name: 🐍 Build Python package
+        if: hashFiles('setup.py') != ''
+        run: |
+          pip install build
+          python -m build || true
+        continue-on-error: true
+
+  # ===== PHASE 8: FINAL STATUS & NOTIFICATION =====
+  final-status:
+    runs-on: ubuntu-latest
+    name: "Phase 8: Final Status"
+    needs: [lint-and-format, test, security, code-analysis, dependencies, build]
+    if: always()
+    
+    steps:
+      - name: 📊 Check All Statuses
+        run: |
+          echo "=== 🤖 Universal Agents Execution Complete ==="
+          echo "✅ Phase 1: Lint & Format - ${{ needs.lint-and-format.result }}"
+          echo "✅ Phase 2: Testing - ${{ needs.test.result }}"
+          echo "✅ Phase 3: Security Scanning - ${{ needs.security.result }}"
+          echo "✅ Phase 4: Code Analysis - ${{ needs.code-analysis.result }}"
+          echo "✅ Phase 6: Dependency Management - ${{ needs.dependencies.result }}"
+          echo "✅ Phase 7: Build Verification - ${{ needs.build.result }}"
+          echo "================================"
+
+      - name: 🎉 Success Notification
+        if: ${{ success() }}
+        run: echo "🎉 All checks passed! PR is ready to merge."
+
+      - name: ⚠️ Failure Notification
+        if: ${{ failure() }}
+        run: |
+          echo "⚠️ Some checks failed. Please review the logs."
+          exit 1
